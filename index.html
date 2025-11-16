@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>병뚜껑 빙고</title>
+<style>
+body { margin:0; overflow:hidden; }
+canvas { display:block; background:#e2ebf3; touch-action: none; }
+
+button {
+  position:absolute;
+  font-weight:bold;
+  border-radius:10px;
+  border:none;
+  cursor:pointer;
+  box-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+  transition:0.2s;
+  color:white;
+}
+
+/* 치우기 버튼 */
+#cleanBtn { background: #0066cc; }
+#cleanBtn:hover { background: #005bb5; }
+
+/* 재시작 버튼 */
+#restartBtn { 
+  background: #4da6ff; 
+}
+#restartBtn:hover { 
+  background: #3399ff; 
+}
+
+/* 도움말 버튼 */
+#helpBtn {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #999;
+  color: white;
+  font-weight: bold;
+  font-size: 20px;
+  border: none;
+  cursor: pointer;
+}
+#helpBtn:hover { background: #777; }
+
+/* 모달 */
+.modal {
+  display: none;
+  position: fixed;
+  top:0; left:0;
+  width:100%; height:100%;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+}
+.modal-content {
+  background: white;
+  margin: 15% auto;
+  padding: 20px;
+  width: 300px;
+  border-radius: 10px;
+  position: relative;
+}
+#closeBtn {
+  position: absolute;
+  top: 5px; right: 10px;
+  font-size: 24px;
+  font-weight: bold;
+  cursor: pointer;
+}
+</style>
+</head>
+
+
+
+
+<body>
+<canvas id="game"></canvas>
+
+<!-- 버튼 -->
+<button id="cleanBtn">치우기</button>
+<button id="restartBtn">재시작</button>
+<button id="helpBtn">?</button>
+
+<!-- 도움말 모달 -->
+<div id="helpModal" class="modal">
+  <div class="modal-content">
+    <span id="closeBtn">&times;</span>
+    <h3>게임 방법</h3>
+    <p>
+      - 병뚜껑을 드래그하여 날리세요.<br><br>
+      - 빙고판의 흰색 칸에 병뚜껑이 닿으면 빨간색으로 바뀝니다.<br><br>
+      - 가로, 세로, 대각선 빙고 완성 시 금색으로 변하고 점수를 획득합니다.<br><br>
+      - 라이프 혹은 병뚜껑이 모두 사라지면 게임 종료.<br><br>
+      - 치우기 버튼으로 이미 멈춘 병뚜껑을 제거 가능합니다.
+    </p>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ==========================
+// 0-1. 사운드 로드
+// ==========================
+const soundPop = new Audio('pop.mp3');          // 발사
+const soundHit = new Audio('hit.mp3');          // 빙고판 적중
+const soundBingo = new Audio('bingo.mp3');      // 부분 빙고 완성
+const soundBingoAll = new Audio('bingoAll.mp3'); // 전체 빙고 완성
+const soundLifeLost = new Audio('lifeLost.mp3'); // 라이프 하나 깎일 때 재생
+const soundGameOver = new Audio('gameover.mp3'); // 게임 종료
+
+// ==========================
+// 0-2. 캔버스 및 리사이즈
+// ==========================
+function resizeCanvas(){
+    const targetRatio = 9/16;
+    const windowRatio = window.innerWidth / window.innerHeight;
+    if(windowRatio > targetRatio){
+        canvas.height = window.innerHeight;
+        canvas.width = canvas.height * targetRatio;
+    } else {
+        canvas.width = window.innerWidth;
+        canvas.height = canvas.width / targetRatio;
+    }
+    canvas.style.position = 'absolute';
+    canvas.style.left = `${(window.innerWidth - canvas.width)/2}px`;
+    canvas.style.top = `${(window.innerHeight - canvas.height)/2}px`;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ==========================
+// 1. 게임 상태
+// ==========================
+const gravity = 0.4;
+const friction = 0.90;
+const maxShots = 10;
+let shotsLeft = maxShots;
+let usedShots = 0;
+let gameOver = false;
+let life = 3;
+let score = 0;
+let lifeHitFlash = 0;
+
+// ==========================
+// 2. 스케일 기준값
+// ==========================
+function getScale(){ return canvas.width / 400; }
+function spawnX(){ return canvas.width/2; }
+function spawnY(){ return canvas.height - 100*getScale(); }
+
+// ==========================
+// 3. 병뚜껑
+// ==========================
+function makeCap(x,y){
+    const s=getScale();
+    return {x:x, y:y, z:0, vx:0, vy:0, vz:0, radius:20*s, stopped:false};
+}
+let readyCap = makeCap(spawnX(), spawnY());
+let thrownCaps = [];
+
+// ==========================
+// 4. 입력
+// ==========================
+let dragging=false, dragStart={x:0,y:0}, dragPos={x:0,y:0};
+function getPos(e){ if(e.touches) e=e.touches[0]; const r=canvas.getBoundingClientRect(); return {x:e.clientX-r.left, y:e.clientY-r.top}; }
+
+canvas.addEventListener('pointerdown', e=>{
+    if(gameOver || !readyCap) return;
+    const pos=getPos(e);
+    if(Math.hypot(pos.x-readyCap.x,pos.y-readyCap.y)<=readyCap.radius+2){
+        dragging=true; dragStart=pos; dragPos=pos;
+    }
+});
+canvas.addEventListener('pointermove', e=>{ if(dragging) dragPos=getPos(e); });
+canvas.addEventListener('pointerup', e=>{
+    if(!dragging || !readyCap) return;
+    dragging=false;
+    const dx=dragPos.x-dragStart.x, dy=dragPos.y-dragStart.y;
+    const powerFactor=0.15;
+    readyCap.vx=-dx*powerFactor;
+    readyCap.vy=-dy*powerFactor;
+    readyCap.vz=Math.max(6, Math.hypot(dx,dy)*0.04+4);
+    thrownCaps.push(readyCap);
+    shotsLeft--; usedShots++;
+
+    // 발사 사운드 재생
+    soundPop.currentTime = 0;
+    soundPop.play();
+
+    readyCap = shotsLeft>0 ? makeCap(spawnX(), spawnY()) : null;
+});
+
+// ==========================
+// 5. 빙고판
+// ==========================
+function bingoX(){ return canvas.width/2 - 90*getScale(); }
+function bingoY(){ return canvas.height/3; }
+let bingoCells=[];
+
+function initBingoCells(){
+    const s=getScale();
+    bingoCells=[];
+    for(let r=0;r<3;r++){
+        for(let c=0;c<3;c++){
+            bingoCells.push({
+                x: bingoX()+c*60*s,
+                y: bingoY()+r*60*s,
+                w: 60*s,
+                h: 60*s,
+                color:'white'
+            });
+        }
+    }
+}
+initBingoCells();
+
+let allBingoBlinking=false, blinkCount=0, blinkTimer=0;
+
+// ==========================
+// 5-1. 빙고 체크
+// ==========================
+function checkBingo(cell){
+    // 셀 색 변경 및 점수
+    if(cell.color === 'white'){
+        cell.color = 'red';
+        score += 50;
+    }
+
+    let newBingos = 0;
+
+    // 가로 체크
+    for(let r = 0; r < 3; r++){
+        const idx = [0,1,2].map(c => r*3 + c);
+        if(idx.every(i => bingoCells[i].color === 'red' || bingoCells[i].color === 'gold')){
+            if(idx.some(i => bingoCells[i].color !== 'gold')){
+                idx.forEach(i => bingoCells[i].color = 'gold');
+                newBingos++;
+            }
+        }
+    }
+
+    // 세로 체크
+    for(let c = 0; c < 3; c++){
+        const idx = [0,1,2].map(r => r*3 + c);
+        if(idx.every(i => bingoCells[i].color === 'red' || bingoCells[i].color === 'gold')){
+            if(idx.some(i => bingoCells[i].color !== 'gold')){
+                idx.forEach(i => bingoCells[i].color = 'gold');
+                newBingos++;
+            }
+        }
+    }
+
+    // 대각선 체크
+    const l = [0,4,8], r = [2,4,6];
+    if(l.every(i => bingoCells[i].color === 'red' || bingoCells[i].color === 'gold')){
+        if(l.some(i => bingoCells[i].color !== 'gold')){
+            l.forEach(i => bingoCells[i].color = 'gold');
+            newBingos++;
+        }
+    }
+    if(r.every(i => bingoCells[i].color === 'red' || bingoCells[i].color === 'gold')){
+        if(r.some(i => bingoCells[i].color !== 'gold')){
+            r.forEach(i => bingoCells[i].color = 'gold');
+            newBingos++;
+        }
+    }
+
+    // 부분 빙고 완성 시 사운드 재생
+    if(newBingos > 0){
+        soundBingo.currentTime = 0;
+        soundBingo.play();
+    }
+
+    // shotsLeft, 점수 업데이트
+    shotsLeft += 5*newBingos;
+    if(shotsLeft > 10) shotsLeft = 10;
+    if(newBingos === 1) score += 500;
+    else if(newBingos === 2) score += 1200;
+    else if(newBingos === 3) score += 2500;
+
+    // 전체 골드 빙고 깜빡임
+    if(bingoCells.every(c => c.color === 'gold') && !allBingoBlinking){
+        allBingoBlinking = true;
+        blinkCount = 0;
+        blinkTimer = 0;
+        score += 5000;
+
+        // 전체 빙고 사운드
+        soundBingoAll.currentTime = 0;
+        soundBingoAll.play();
+    }
+
+    // 새 캡 준비
+    if(!readyCap && shotsLeft > 0) readyCap = makeCap(spawnX(), spawnY());
+}
+
+// ==========================
+// 6. 물리
+// ==========================
+function updatePhysics(){
+    const s = getScale(), extra = 100*s;
+    const tL = bingoX()-extra/2, tR=tL+3*60*s+extra, tT=bingoY()-extra/2, tB=tT+3*60*s+extra;
+
+    for(let i=thrownCaps.length-1;i>=0;i--){
+        const c=thrownCaps[i];
+        c.x+=c.vx; c.y+=c.vy; c.vz-=gravity;
+
+        if(c.z+c.vz<=0){
+            c.z=0; c.vz=0; c.vx*=friction; c.vy*=friction;
+            if(Math.abs(c.vx)<0.06 && Math.abs(c.vy)<0.06){
+                c.vx=0; c.vy=0; c.stopped=true;
+                // 빙고판 적중 체크
+                for(let cell of bingoCells){
+                    if(c.x>cell.x && c.x<cell.x+cell.w && c.y>cell.y && c.y<cell.y+cell.h && cell.color==='white'){
+                        checkBingo(cell); thrownCaps.splice(i,1); 
+                        // 적중 사운드
+                        soundHit.currentTime = 0;
+                        soundHit.play();
+                        break;
+                    }
+                }
+                // 캔버스 밖 → 라이프 감소
+                if(c.x<tL||c.x>tR||c.y<tT||c.y>tB){ 
+                    thrownCaps.splice(i,1); life--; lifeHitFlash=15; 
+                    // 라이프감소 사운드
+                    soundLifeLost.currentTime = 0;
+                    soundLifeLost.play();
+
+                    // 라이프가 0 → 게임오버 사운드
+                    if(life <= 0){  gameOver = true;  }
+                    continue;                                       
+                }
+            }
+        } else c.z+=c.vz;
+    }
+
+    //빙고 전체 깜빡임
+    if(allBingoBlinking){
+        blinkTimer++;
+        if(blinkTimer%30===0){ bingoCells.forEach(c=>c.color=(c.color==='gold')?'white':'gold'); blinkCount++; }
+        if(blinkCount>=6){ bingoCells.forEach(c=>c.color='white'); allBingoBlinking=false; }
+    }
+
+    //병뚜껑 다 써서 게임오버
+    if(shotsLeft===0 && !readyCap && thrownCaps.every(c=>c.stopped)){   gameOver=true;  }
+}
+
+
+// ==========================
+// 7. 렌더링 (게임 종료 시 배경 흐림 + 사운드)
+// ==========================
+let gameOverPlayed = false;
+
+function render(){
+    const s = getScale();
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    const extra = 100*s;
+
+    // --------------------------
+    // 일반 게임 화면 (배경 포함)
+    // --------------------------
+    // 테이블
+    ctx.fillStyle = '#a3c6f0';
+    ctx.fillRect(bingoX()-extra/2, bingoY()-extra/2, 3*60*s+extra, 3*60*s+extra);
+    ctx.strokeStyle = '#4a4a4a'; 
+    ctx.lineWidth = 2*s;
+    ctx.strokeRect(bingoX()-extra/2, bingoY()-extra/2, 3*60*s+extra, 3*60*s+extra);
+
+    // 빙고셀
+    bingoCells.forEach(c => {
+        ctx.fillStyle = c.color;
+        ctx.fillRect(c.x, c.y, c.w, c.h);
+        ctx.strokeStyle = 'powderblue';
+        ctx.lineWidth = 2*s;
+        ctx.strokeRect(c.x, c.y, c.w, c.h);
+    });
+
+    // 던진 병뚜껑
+    thrownCaps.forEach(c => {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y - c.z, c.radius, 0, Math.PI*2);
+        ctx.fillStyle = 'red';
+        ctx.fill();
+    });
+
+    // 준비 병뚜껑
+    if(readyCap){
+        ctx.beginPath();
+        ctx.arc(readyCap.x, readyCap.y - readyCap.z, readyCap.radius, 0, Math.PI*2);
+        ctx.fillStyle = 'red';
+        ctx.fill();
+        if(dragging){
+            ctx.strokeStyle='yellow';
+            ctx.beginPath();
+            ctx.moveTo(readyCap.x, readyCap.y);
+            ctx.lineTo(dragPos.x, dragPos.y);
+            ctx.stroke();
+        }
+    }
+
+    // 라이프 깎일 때 빨강 깜빡임
+    if(lifeHitFlash > 0){
+        ctx.fillStyle = 'rgba(255,0,0,0.3)';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        lifeHitFlash--;
+    }
+
+    // 점수, 라이프, 남은 병뚜껑
+    const iconRadius = 8*s, startX = 20*s, iconY = 70*s, iconOffsetX = 5*s;
+    ctx.fillStyle='black';
+    ctx.font = `${18*s}px sans-serif`;
+    ctx.textAlign='center';
+    ctx.fillText(`점수: ${score}`, canvas.width/2, 30*s);
+    for(let i=0;i<shotsLeft;i++){
+        ctx.beginPath();
+        ctx.arc(startX+iconOffsetX+i*(iconRadius*2+5*s), iconY, iconRadius, 0, Math.PI*2);
+        ctx.fillStyle='red';
+        ctx.fill();
+    }
+    ctx.fillStyle='black';
+    ctx.font=`${14*s}px sans-serif`;
+    ctx.textAlign='left';
+    ctx.fillText(`라이프: ${life}/3`, startX, iconY+25*s);
+
+    // --------------------------
+    // 게임 종료 처리
+    // --------------------------
+    if(gameOver){
+        // 기존 게임 화면 위에 반투명 레이어
+        ctx.fillStyle = 'rgba(0,0,0,0.5)'; // 50% 투명도
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+
+        // 종료 문구
+        ctx.fillStyle='white';
+        ctx.textAlign='center';
+        ctx.font=`${36*s}px sans-serif`;
+        ctx.fillText('게임 종료', canvas.width/2, canvas.height/2 - 40*s);
+        ctx.font=`${20*s}px sans-serif`;
+        ctx.fillText(`점수: ${score}`, canvas.width/2, canvas.height/2);
+        ctx.fillText(`사용한 병뚜껑: ${usedShots}`, canvas.width/2, canvas.height/2 + 30*s);
+
+        // 게임오버 사운드 한 번만 재생
+        if(!gameOverPlayed){
+            soundGameOver.currentTime = 0;
+            soundGameOver.play();
+            gameOverPlayed = true;
+        }
+
+        // 재시작 버튼 계속 표시
+        updateButtonPos();
+    } else {
+        // 일반 게임일 땐 재시작 버튼 숨김
+        restartBtn.style.display = 'none';
+        gameOverPlayed = false;
+    }
+}
+
+
+
+// ==========================
+// 8. 버튼 기능
+// ==========================
+const cleanBtn = document.getElementById('cleanBtn');
+const restartBtn = document.getElementById('restartBtn');
+
+cleanBtn.addEventListener('click', ()=>{
+    const s=getScale();
+    const extra=100*s;
+    const tL=bingoX()-extra/2, tR=tL+3*60*s+extra, tT=bingoY()-extra/2, tB=tT+3*60*s+extra;
+    thrownCaps=thrownCaps.filter(c=>!(c.stopped && c.x>tL && c.x<tR && c.y>tT && c.y<tB));
+});
+
+restartBtn.addEventListener('click', ()=>{
+    shotsLeft=maxShots; usedShots=0; thrownCaps=[]; readyCap=makeCap(spawnX(),spawnY());
+    bingoCells.forEach(c=>c.color='white'); life=3; score=0; allBingoBlinking=false; blinkCount=0; gameOver=false;
+});
+
+// ==========================
+// 8-1. 도움말 버튼 & 모달
+// ==========================
+const helpBtn = document.getElementById('helpBtn');
+const helpModal = document.getElementById('helpModal');
+const closeBtn = document.getElementById('closeBtn');
+
+helpBtn.addEventListener('click', ()=>{ helpModal.style.display='block'; });
+closeBtn.addEventListener('click', ()=>{ helpModal.style.display='none'; });
+window.addEventListener('click', (e)=>{ if(e.target===helpModal) helpModal.style.display='none'; });
+
+// 버튼 위치 업데이트
+function updateButtonPos(){
+    const s=getScale(), rect=canvas.getBoundingClientRect();
+    const cw=100*s, ch=40*s, rw=200*s, rh=40*s;
+    const fontSize = 18*s;
+
+    cleanBtn.style.left = (rect.left + canvas.width - cw - 10*s) + 'px';
+    cleanBtn.style.top  = (rect.top + 60*s) + 'px';
+    cleanBtn.style.width = cw + 'px';
+    cleanBtn.style.height = ch + 'px';
+    cleanBtn.style.fontSize = fontSize + 'px';
+
+    if(gameOver){
+        restartBtn.style.display = 'block';
+        restartBtn.style.left = (rect.left + canvas.width/2 - rw/2) + 'px';
+        restartBtn.style.top  = (rect.top + canvas.height/2 + 60*s) + 'px';
+        restartBtn.style.width = rw + 'px';
+        restartBtn.style.height = rh + 'px';
+        restartBtn.style.fontSize = fontSize + 'px';
+    } else restartBtn.style.display = 'none';
+
+    // 도움말 버튼 위치
+    const size = 40*s;
+    helpBtn.style.left = (rect.left + canvas.width - size - 10*s) + 'px';
+    helpBtn.style.top  = (rect.top + 10*s) + 'px';
+    helpBtn.style.width = size + 'px';
+    helpBtn.style.height = size + 'px';
+    helpBtn.style.fontSize = `${20*s}px`;
+}
+
+// ==========================
+// 9. 루프
+// ==========================
+function loop(){ updatePhysics(); render(); updateButtonPos(); requestAnimationFrame(loop); }
+loop();
+window.addEventListener('resize', ()=>{ resizeCanvas(); initBingoCells(); updateButtonPos(); });
+</script>
+</body>
+</html>
